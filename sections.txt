@@ -1,0 +1,330 @@
+Section 0: Setup and imports
+WHAT: Load libraries, set paths, configure display/plot style.
+WHY: Reproducibility. Reviewers (and you in the Loom) need to rerun this cleanly.
+HOW:
+
+Fix random seeds (numpy, model random_state)
+Define paths to data/train_test.csv, data/validation.csv, templates
+Load data into train_df and val_df
+No modeling yet. Just load and print shapes.
+
+Section 1: Problem framing (before any plots)
+WHAT: Write 5–10 sentences on what a freight rate is and what drives it.
+WHY: Sets domain context for everything after. This is what makes your submission feel intentional.
+HOW: Cover:
+
+Rate = price for moving freight on a lane under specific equipment/weight/date conditions
+Why distance alone is not enough (equipment, reefer premium, backhaul lanes, timing)
+Why market_index and quote_signal might help but are not guaranteed to be strong linear predictors (you will test this later)
+State your target: posted_rate (regression, positive dollars)
+This section is markdown only. No code.
+
+Section 2: First look at the schema
+WHAT: Inspect columns, dtypes, row counts, head/tail.
+WHY: Know what you have before cleaning.
+HOW:
+
+train_df.info()
+train_df.describe()
+train_df.columns.tolist()
+val_df.columns.tolist()   # note: no posted_rate
+Things to notice and document:
+
+Train has 14 columns; validation has 13 (no target)
+load_id prefix: TR- in train, TE- in validation
+Numeric vs categorical columns
+Write a small table in markdown: column name | type | role (feature/target/id).
+
+Section 3: Data quality audit
+WHAT: Systematic check for missing values, duplicates, invalid ranges, type issues.
+WHY: Submission requires you to discuss data quality in the Loom. Fixes here affect model trust.
+HOW: Run checks separately on train and validation.
+
+Checks to include:
+
+Check	What to look for
+Missing values
+Expect missing weight (~300 train, ~165 val) and market_index (~374 train, ~249 val)
+Duplicate load_id
+Should be zero
+Negative/zero distance, weight, rate
+Should not exist in train
+Date parsing
+Convert date to datetime; confirm ranges
+Equipment values
+Should be exactly 3 types
+Coordinate sanity
+Lat/lon within US bounds
+Target sanity
+posted_rate > 0; note skew/outliers
+For missing data, do not silently drop rows without recording the count and reasoning. In the Loom you need to explain what you did.
+
+Suggested handling (decide after you inspect):
+
+Weight: impute (median by equipment, or a flag + imputation). Missing weight is likely informative.
+market_index: impute (median by month, or forward-fill by time). Add market_index_missing binary flag.
+Document every decision in markdown before implementing.
+
+Section 4: Univariate EDA (understand each column)
+WHAT: Distribution of each feature and the target.
+WHY: Tells you scaling needs, outliers, transforms, and what "normal" looks like.
+HOW:
+
+Target (posted_rate):
+
+Histogram + boxplot
+Report mean, median, skew
+Expect right skew; consider whether log(posted_rate) helps modeling (try both later)
+Derived sanity metric (create for analysis only):
+
+train_df["rate_per_mile"] = train_df["posted_rate"] / train_df["distance"]
+Plot rate_per_mile distribution. Often more stable than raw rate.
+Flag extreme RPM values; investigate a few manually in markdown
+Numeric features: distance, weight, market_index, quote_signal
+
+Histograms/KDEs
+Summary stats
+Categorical: equipment
+
+Count plot
+Compare rate distributions by equipment (box/violin)
+Temporal: date
+
+Loads per month
+Mean/median rate by month (line plot)
+Day-of-week pattern if visible
+Geographic: pickup, delivery
+
+Count of unique cities (~64 each side in train)
+Top 10 origin/destination cities by volume
+After each plot, add 2–3 sentences: what you see, whether it matches freight intuition, what it implies for modeling.
+
+Section 5: Bivariate EDA and domain checks
+WHAT: How features relate to each other and to the target.
+WHY: Drives feature engineering and model choice.
+HOW:
+
+Correlations (numeric only):
+
+Correlation matrix heatmap
+Expect weak linear correlation between market_index/quote_signal and posted_rate. That is normal. Do not discard them without testing in a model.
+Rate vs distance:
+
+Scatter plot with color = equipment
+Expect upward trend but plenty of spread (same distance, different lanes, different rates)
+Rate vs weight:
+
+Scatter or binned plot by equipment
+Rate vs market signals:
+
+Scatter plots for market_index and quote_signal
+Same city-pair, different distance (important):
+
+pair_stats = train_df.groupby(["pickup", "delivery"])["distance"].agg(["count", "nunique", "std"])
+pair_stats[pair_stats["nunique"] > 1].sort_values("nunique", ascending=False).head(10)
+You will likely find many O-D pairs where distance varies even though city coordinates are fixed. That reflects routing variation or noise. Note it. Do not assume pickup + delivery alone defines distance.
+
+Haversine check (optional but strong):
+
+Compute straight-line miles from lat/lon
+Compare to provided distance
+Ratio is often ~1.1–1.2 (road vs straight line). Extreme ratios deserve a sentence in your report.
+December lane check: Filter training rows close to the December scenario:
+
+pickup = Lexington, delivery = Fort Wayne
+equipment = Dry Van
+distance near 360
+See how many exist and how their rates vary by date. This connects directly to the December chart you must produce.
+
+Section 6: Temporal split strategy (critical section)
+WHAT: Define exactly how you split train_test.csv for development.
+WHY: Required in report and Loom. Wrong split = overconfident model that fails on Nov–Dec.
+HOW:
+
+Primary internal split (recommended):
+
+Train: Jan 2025 – Aug 2025
+Validation: Sep 2025 – Oct 2025
+Or use expanding window CV with 2–3 folds, always respecting time order.
+
+What NOT to do as your main story:
+
+Random 80/20 split across all months without acknowledging temporal leakage
+Metrics to track on time-based validation:
+
+MAE, RMSE, MAPE (careful with low rates), R²
+Also MAE on rate_per_mile (often easier to interpret)
+Optional: Compare random split vs time split side by side. If random looks much better, that confirms temporal drift and strengthens your argument for time-based validation.
+
+Write a markdown cell titled "Validation Strategy" with a diagram or bullet list. This text can go almost directly into your PDF report.
+
+Section 7: Feature engineering
+WHAT: Build features used by all models.
+WHY: Raw columns alone underuse geography, time, and market structure.
+HOW: Build a build_features(df) function so train/val/december use identical logic.
+
+Feature groups to consider:
+
+A. Temporal
+
+month, day_of_week, week_of_year
+Cyclical encoding: sin/cos for month and day-of-week (helps tree and linear models)
+is_weekend, is_month_end if patterns show up in EDA
+B. Load / lane
+
+rate_per_mile as a feature is leakage if computed from target. Do not use it as input.
+log_weight, weight_missing_flag
+log_distance
+Equipment one-hot or ordinal (Dry Van=0, Flatbed=1, Reefer=2) after checking rate ordering
+C. Geographic
+
+Keep lat/lon for pickup and delivery
+bearing (direction of haul)
+mid_lat, mid_lon
+Region buckets (Northeast, Southeast, etc.) from lat/lon if you want interpretability
+Target encoding for pickup and delivery with time-aware CV only (encode using past folds, never future data). This is high impact but easy to leak; implement carefully or skip if unsure.
+D. Market
+
+market_index, quote_signal
+market_index_missing_flag
+Interactions: quote_signal * equipment, market_index * month
+E. Lane identity
+
+pickup + "->" + delivery as a categorical (high cardinality; tree models handle this well)
+Or separate origin/destination encodings
+Pipeline rule: All imputation, encoding, scaling inside a sklearn Pipeline / ColumnTransformer fit on training folds only.
+
+Section 8: Baseline models (establish the floor)
+WHAT: Train simple models before anything fancy.
+WHY: Baselines give context. Reviewers want to see progression, not one black box.
+HOW: Use the same time-based validation split from Section 6.
+
+Suggested baselines:
+
+Model	Purpose
+Median by equipment
+Trivial baseline
+Linear Regression on numeric + one-hot
+Interpretable; shows linear signal ceiling
+Rate = a × distance + b per equipment
+Domain baseline
+Random Forest
+Nonlinear, handles mixed features
+Gradient Boosting (sklearn, LightGBM, or XGBoost)
+Strong tabular default
+Track validation MAE/RMSE in a comparison table. Log results in markdown.
+
+Do not pick the winner yet. Note why each model behaves as it does (e.g. linear model struggles with lane effects).
+
+Section 9: Dimensionality views (PCA / t-SNE for reasoning)
+WHAT: Visualize structure in feature space.
+WHY: Supports model choice in the Loom beyond "highest score." Shows whether lanes/equipment form clusters.
+HOW:
+
+Build a numeric matrix from engineered features (scaled).
+PCA: 2D scatter colored by equipment or binned posted_rate.
+t-SNE: subsample (e.g. 3,000–5,000 rows; t-SNE is slow) with same coloring.
+How to interpret in your narrative:
+
+If points form overlapping clouds with no clean separation, complex boundaries matter → tree/GBM justified.
+If equipment or rate bins separate visually, categorical splits are meaningful → tree models make sense.
+If structure is mostly driven by distance/weight, simpler models may suffice.
+These plots go in the notebook and optionally in the report. They are for reasoning, not for feeding directly into the final model.
+
+Section 10: Model selection and final training
+WHAT: Choose one primary model, tune it, train on all labeled data.
+WHY: Submission asks you to justify the model, not just pick the top row in a table.
+HOW:
+
+Likely winner: Gradient boosting (LightGBM/XGBoost) or Random Forest. Tabular data, mixed categoricals, nonlinear lane effects, ~48k rows: trees are the standard fit.
+
+Justification template (write this in your own words):
+
+Freight rates are nonlinear in distance, equipment, and lane.
+High-cardinality origin/destination needs split-based models, not plain linear regression.
+Time-based validation showed [your metric] on held-out Sep–Oct.
+PCA/t-SNE showed [what you observed].
+Chosen model balances accuracy and practical use (fast inference, handles missing values via pipeline).
+Tuning:
+
+Small grid/random search on time-based CV
+Parameters: n_estimators, max_depth, learning_rate, min_samples_leaf, regularization
+Avoid over-tuning; 48k rows will not need a 200-trial Optuna study
+Final fit:
+
+Retrain on all of train_test.csv (Jan–Oct) using best hyperparameters
+Keep the preprocessing pipeline tied to the model
+Target transform (test this):
+
+Try log1p(posted_rate) as target, predict, then expm1 back
+Compare validation MAE in dollar space
+Use whichever wins on time-based validation
+Constraint: Final predictions must be > 0. Clip or use a model that naturally stays positive (log target helps).
+
+Section 11: Error analysis (makes you stand out)
+WHAT: Inspect where the model fails.
+WHY: Strong Loom material. Shows depth beyond accuracy numbers.
+HOW:
+
+Plot predicted vs actual on internal time validation
+Residual histogram
+MAE by equipment, by distance decile, by month
+Top 20 worst errors: look at lane, equipment, date. Any pattern?
+If Sep–Oct errors are systematically higher for certain lanes, say so. That honesty reads well in an interview setting.
+
+Section 12: Generate submission predictions
+WHAT: Predict all validation loads + December rows.
+WHY: Required deliverables.
+HOW:
+
+A. validation_predictions.csv
+
+val_pred = model.predict(val_features)
+# merge with template load_ids, ensure order matches
+# assert len == 12000, all rates > 0
+val_pred.to_csv("validation_predictions.csv", index=False)
+B. data/december_chart_inputs.csv
+
+Load the template
+Build features for each of the 31 rows (Lexington → Fort Wayne, 360 mi, Dry Van, 32000 lb, dates Dec 1–31)
+Predict and fill predicted_rate
+Save back to data/december_chart_inputs.csv
+Sanity check on December curve:
+
+Plot your 31 predictions over date before running score.py
+Compare to Lexington–Fort Wayne Dry Van rates in training over time
+Curve should be plausible (no wild day-to-day jumps unless market signal supports it)
+Run scorer:
+
+python score.py --predictions validation_predictions.csv --december-predictions data/december_chart_inputs.csv
+Fix anything it rejects before submitting.
+
+Section 13: Feature importance and interpretability
+WHAT: Show what drove predictions.
+WHY: Defends model choice; good for report and Loom.
+HOW:
+
+Tree model: feature_importances_
+Or SHAP on a sample (optional, not required)
+Comment on top features in domain terms (distance, equipment, lane encodings, month, quote_signal)
+Keep this short and tied to freight logic.
+
+Section 14: Reproducibility and export
+WHAT: Make the repo runnable by someone else.
+WHY: Explicit submission requirement.
+HOW:
+
+Save final pipeline with joblib
+Add predict.py or notebook cells that load model and regenerate both CSVs
+Update README with: install, train, predict, score commands
+PDF report outline (maps to submission)
+Problem summary (half page)
+Data overview (columns, date ranges, missing data)
+Validation strategy (time split, metrics, why not random)
+Key EDA findings (2–3 bullet points with one chart)
+Feature engineering (table of features)
+Model comparison (small table)
+Final model choice + justification
+December chart (candidate_december.png from scorer)
+Limitations (temporal extrapolation to Nov–Dec, sparse December lane data, etc.)
+Keep it 3–5 pages. Clean beats long.
