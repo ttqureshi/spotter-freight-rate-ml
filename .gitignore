@@ -4,5 +4,3 @@ __pycache__/
 .ipynb_checkpoints/
 .env
 .env.*
-scorer_results/
-validation_predictions.csv
